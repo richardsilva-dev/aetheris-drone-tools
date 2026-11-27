@@ -8,6 +8,7 @@ import sys
 from collections import deque
 from datetime import datetime, timezone
 from time import monotonic
+from urllib.parse import urlsplit
 
 import cv2
 
@@ -36,6 +37,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="Salva métricas e o resultado da sessão em um relatório JSON.",
     )
     return parser
+
+
+def _redact_source_url(value: str) -> str:
+    """Keep only the RTSP endpoint authority; never persist credentials or tokens."""
+    try:
+        parsed = urlsplit(value)
+        scheme = parsed.scheme.lower()
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return "[redacted]"
+
+    if scheme not in {"rtsp", "rtsps"} or not hostname:
+        return "[redacted]"
+
+    safe_host = hostname.lower()
+    if ":" in safe_host:
+        safe_host = f"[{safe_host}]"
+    authority = safe_host + (f":{port}" if port is not None else "")
+    return f"{scheme}://{authority}/[redacted]"
 
 
 def _get_frame_dimensions(frame: object) -> tuple[int, int]:
@@ -217,7 +238,7 @@ def main() -> int:
                 "schema_version": 1,
                 "started_at_utc": session_started_at,
                 "duration_seconds": round(elapsed, 3),
-                "source_url": args.url,
+                "source_url": _redact_source_url(args.url),
                 "frames_received": frames_seen,
                 "average_fps": round(average_fps, 3),
                 "status": status,
