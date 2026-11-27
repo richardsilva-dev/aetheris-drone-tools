@@ -314,3 +314,36 @@ def test_stats_json_records_empty_stream(monkeypatch, tmp_path):
     assert report["frames_received"] == 0
     assert report["average_fps"] == 0.0
     assert report["exit_code"] == 2
+
+
+
+def test_stats_json_redacts_credentials_and_query_from_rejected_url(
+    monkeypatch, tmp_path
+):
+    secret = "do-not-store-this-token"
+    source_url = (
+        f"rtsp://operator:{secret}@camera.example/live?token={secret}"
+    )
+    output = tmp_path / "session.json"
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "aetheris-video",
+            "--url",
+            source_url,
+            "--stats-json",
+            str(output),
+        ],
+    )
+    open_capture = Mock()
+    monkeypatch.setattr(cli, "open_capture", open_capture)
+    monkeypatch.setattr(cli.cv2, "destroyAllWindows", lambda: None)
+
+    assert cli.main() == 1
+
+    serialized = output.read_text(encoding="utf-8")
+    report = json.loads(serialized)
+    assert report["source_url"] == "rtsp://camera.example/[redacted]"
+    assert secret not in serialized
+    open_capture.assert_not_called()
