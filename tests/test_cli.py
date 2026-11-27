@@ -1,5 +1,6 @@
-
 from unittest.mock import Mock
+
+import json
 
 from aetheris_drone import cli
 
@@ -223,3 +224,93 @@ def test_writer_release_failure_does_not_prevent_capture_release(
     assert writer.released
     assert capture.released
     assert "falha ao liberar gravador" in capsys.readouterr().err
+
+
+def test_stats_json_records_successful_session(monkeypatch, tmp_path, capsys):
+    capture = FakeCapture()
+    frames = [FakeFrame(), FakeFrame(), FakeFrame()]
+    output = tmp_path / "reports" / "session.json"
+
+    monkeypatch.setattr(
+        "sys.argv",
+        ["aetheris-video", "--stats-json", str(output)],
+    )
+    configure_capture(monkeypatch, capture, frames)
+    configure_display(monkeypatch, wait_key=-1)
+
+    result = cli.main()
+
+    report = json.loads(output.read_text(encoding="utf-8"))
+
+    assert result == 0
+    assert report["schema_version"] == 1
+    assert report["status"] == "completed"
+    assert report["stop_reason"] == "read_ended"
+    assert report["frames_received"] == 3
+    assert report["average_fps"] == 2.0
+    assert report["exit_code"] == 0
+    assert report["error"] is None
+    assert capture.released
+    assert "Relatório da sessão salvo" in capsys.readouterr().out
+
+
+def test_stats_json_records_user_stop(monkeypatch, tmp_path):
+    capture = FakeCapture()
+    output = tmp_path / "session.json"
+
+    monkeypatch.setattr(
+        "sys.argv",
+        ["aetheris-video", "--stats-json", str(output)],
+    )
+    configure_capture(monkeypatch, capture, [FakeFrame()])
+    configure_display(monkeypatch, wait_key=ord("q"))
+
+    assert cli.main() == 0
+
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert report["stop_reason"] == "user_requested"
+    assert report["frames_received"] == 1
+    assert report["average_fps"] == 0.0
+
+
+def test_stats_json_records_connection_error(monkeypatch, tmp_path):
+    output = tmp_path / "session.json"
+
+    def fail_connection(config):
+        raise ConnectionError("RTSP unavailable")
+
+    monkeypatch.setattr(
+        "sys.argv",
+        ["aetheris-video", "--stats-json", str(output)],
+    )
+    monkeypatch.setattr(cli, "open_capture", fail_connection)
+    monkeypatch.setattr(cli.cv2, "destroyAllWindows", lambda: None)
+
+    assert cli.main() == 1
+
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert report["status"] == "error"
+    assert report["stop_reason"] == "error"
+    assert report["error"] == "RTSP unavailable"
+    assert report["exit_code"] == 1
+
+
+def test_stats_json_records_empty_stream(monkeypatch, tmp_path):
+    capture = FakeCapture()
+    output = tmp_path / "session.json"
+
+    monkeypatch.setattr(
+        "sys.argv",
+        ["aetheris-video", "--stats-json", str(output)],
+    )
+    configure_capture(monkeypatch, capture, [])
+    configure_display(monkeypatch)
+
+    assert cli.main() == 2
+
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert report["status"] == "no_frames"
+    assert report["stop_reason"] == "read_ended"
+    assert report["frames_received"] == 0
+    assert report["average_fps"] == 0.0
+    assert report["exit_code"] == 2

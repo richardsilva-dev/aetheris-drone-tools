@@ -10,6 +10,7 @@ Ferramentas iniciais para investigar a câmera e a conectividade de um drone de 
 - Exibir os frames recebidos usando OpenCV.
 - Medir FPS aproximado durante a sessão.
 - Opcionalmente gravar o vídeo recebido.
+- Salvar métricas e o resultado da sessão em JSON para diagnóstico.
 - Encerrar a captura com segurança ao pressionar `q` ou `Esc`.
 - Manter a recepção de vídeo separada de qualquer futuro módulo de controle de voo.
 
@@ -43,7 +44,7 @@ python -m pip install --upgrade pip
 python -m pip install -e ".[dev]"
 ```
 
-Se a ativação do ambiente virtual for bloqueada pela política do PowerShell, execute os comandos usando diretamente `\.venv\Scripts\python.exe`.
+Se a ativação do ambiente virtual for bloqueada pela política do PowerShell, execute os comandos usando diretamente `.\.venv\Scripts\python.exe`.
 
 ## Executar o receptor
 
@@ -59,6 +60,20 @@ Para gravar a sessão:
 python -m aetheris_drone --url rtsp://192.168.1.1:7070/webcam --record recordings/teste.mp4
 ```
 
+Para gerar um relatório JSON com duração, quantidade de frames, FPS médio, resultado e motivo do encerramento:
+
+```powershell
+python -m aetheris_drone --stats-json recordings/diagnostico.json
+```
+
+As opções podem ser combinadas:
+
+```powershell
+python -m aetheris_drone --record recordings/teste.mp4 --stats-json recordings/diagnostico.json
+```
+
+O relatório registra `read_ended` quando o leitor OpenCV deixa de fornecer frames. A API `VideoCapture.read()` não permite distinguir, por si só, um fim normal do fluxo de uma desconexão; portanto, esse estado não deve ser interpretado como diagnóstico definitivo da causa.
+
 Para encerrar, pressione `q` ou `Esc` na janela do vídeo.
 
 ## Estrutura
@@ -73,8 +88,11 @@ aetheris-drone-tools/
 │       ├── __init__.py
 │       ├── __main__.py
 │       ├── cli.py
+│       ├── reporting.py
 │       └── video.py
 ├── tests/
+│   ├── test_cli.py
+│   ├── test_reporting.py
 │   └── test_video.py
 ├── .gitignore
 ├── LICENSE
@@ -88,7 +106,7 @@ aetheris-drone-tools/
 python -m pytest
 ```
 
-Os testes atuais verificam a configuração e cálculos auxiliares. Eles não substituem um teste de conexão com o drone real.
+Os testes atuais verificam configuração, cálculos auxiliares, fluxo da CLI e geração do relatório. Eles não substituem um teste de conexão com o drone real.
 
 ## Limites desta versão
 
@@ -97,12 +115,13 @@ Os testes atuais verificam a configuração e cálculos auxiliares. Eles não su
 - Não implementa reconhecimento de obstáculos, SLAM, VIO ou navegação autônoma.
 - FPS medido é uma estimativa local da taxa de frames entregues pelo OpenCV; não é uma medição calibrada de latência ponta a ponta.
 - A gravação depende dos codecs disponíveis na instalação do OpenCV.
+- O relatório descreve o comportamento observado pelo processo; não determina a causa física ou de rede de uma interrupção RTSP.
 
 ## Próximas etapas
 
 1. Testar estabilidade da recepção por sessões curtas e depois mais longas.
-2. Registrar FPS, desconexões e erros de leitura sem transmitir comandos.
-3. Identificar com segurança os serviços de rede expostos pelo drone.
+2. Comparar relatórios de sessões, observando FPS, duração e encerramentos.
+3. Identificar com segurança os serviços de rede expostos pelo drone, sem enviar comandos.
 4. Investigar documentação e hardware antes de qualquer integração de controle.
 5. Avaliar simulação e mecanismos de parada/failsafe antes de testes físicos de autonomia.
 

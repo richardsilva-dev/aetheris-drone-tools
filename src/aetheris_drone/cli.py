@@ -1,4 +1,3 @@
-
 """Interface de linha de comando para visualizar o fluxo RTSP."""
 
 from __future__ import annotations
@@ -7,9 +6,12 @@ import argparse
 import math
 import sys
 from collections import deque
+from datetime import datetime, timezone
+from time import monotonic
 
 import cv2
 
+from .reporting import write_session_report
 from .video import VideoConfig, ensure_parent, estimate_fps, iter_frames, open_capture
 
 
@@ -27,6 +29,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--record",
         metavar="ARQUIVO",
         help="Grava o fluxo em um arquivo de vídeo (ex.: recordings/teste.mp4).",
+    )
+    parser.add_argument(
+        "--stats-json",
+        metavar="ARQUIVO",
+        help="Salva métricas e o resultado da sessão em um relatório JSON.",
     )
     return parser
 
@@ -68,14 +75,28 @@ def main() -> int:
 
     timestamps: deque[float] = deque(maxlen=60)
     frames_seen = 0
+    first_frame_timestamp = None
+    last_frame_timestamp = None
+
+    session_started_at = datetime.now(timezone.utc).isoformat()
+    session_started = monotonic()
+    status = "error"
+    stop_reason = "error"
+    exit_code = 1
+    error_message = None
 
     try:
         config = VideoConfig(url=args.url)
         capture = open_capture(config)
+        stop_reason = "read_ended"
 
         print("Fluxo RTSP conectado. Pressione q ou Esc na janela para encerrar.")
 
         for timestamp, frame in iter_frames(capture):
+            if first_frame_timestamp is None:
+                first_frame_timestamp = timestamp
+            last_frame_timestamp = timestamp
+
             timestamps.append(timestamp)
             frames_seen += 1
 
@@ -127,15 +148,20 @@ def main() -> int:
             key = cv2.waitKey(1) & 0xFF
 
             if key in (ord("q"), 27):
+                stop_reason = "user_requested"
                 break
 
         print(f"Frames recebidos: {frames_seen}")
 
         if frames_seen == 0:
             print("Nenhum frame recebido. Verifique a rede e a URL RTSP.")
-            return 2
+            status = "no_frames"
+            exit_code = 2
+            return exit_code
 
-        return 0
+        status = "completed"
+        exit_code = 0
+        return exit_code
 
     except (
         ConnectionError,
@@ -144,8 +170,12 @@ def main() -> int:
         ValueError,
         cv2.error,
     ) as exc:
+        error_message = str(exc)
+        status = "error"
+        stop_reason = "error"
+        exit_code = 1
         print(f"Erro: {exc}")
-        return 1
+        return exit_code
 
     finally:
         for resource, description in (
@@ -168,6 +198,43 @@ def main() -> int:
                 f"Aviso: falha ao fechar as janelas do OpenCV: {exc}",
                 file=sys.stderr,
             )
+
+        if args.stats_json:
+            elapsed = max(0.0, monotonic() - session_started)
+            if (
+                frames_seen >= 2
+                and first_frame_timestamp is not None
+                and last_frame_timestamp is not None
+                and last_frame_timestamp > first_frame_timestamp
+            ):
+                average_fps = (frames_seen - 1) / (
+                    last_frame_timestamp - first_frame_timestamp
+                )
+            else:
+                average_fps = 0.0
+
+            report = {
+                "schema_version": 1,
+                "started_at_utc": session_started_at,
+                "duration_seconds": round(elapsed, 3),
+                "source_url": args.url,
+                "frames_received": frames_seen,
+                "average_fps": round(average_fps, 3),
+                "status": status,
+                "stop_reason": stop_reason,
+                "exit_code": exit_code,
+                "recording_file": args.record,
+                "error": error_message,
+            }
+
+            try:
+                output = write_session_report(args.stats_json, report)
+                print(f"Relatório da sessão salvo em: {output}")
+            except (OSError, TypeError, ValueError) as exc:
+                print(
+                    f"Aviso: não foi possível salvar o relatório: {exc}",
+                    file=sys.stderr,
+                )
 
 
 if __name__ == "__main__":
