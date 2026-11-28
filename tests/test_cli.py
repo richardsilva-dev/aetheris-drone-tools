@@ -1,9 +1,10 @@
-from unittest.mock import Mock
 
 import json
+from unittest.mock import Mock
 
 from aetheris_drone import cli
 
+QUIT_KEY = ord("q")
 
 class FakeFrame:
     def __init__(self, width: int = 640, height: int = 480):
@@ -14,8 +15,9 @@ class FakeFrame:
 
 
 class FakeCapture:
-    def __init__(self, fps: float = 30.0):
+    def __init__(self, fps: float = 30.0, release_error=None):
         self.fps = fps
+        self.release_error = release_error
         self.released = False
 
     def get(self, property_id):
@@ -23,6 +25,8 @@ class FakeCapture:
 
     def release(self):
         self.released = True
+        if self.release_error:
+            raise self.release_error
 
 
 class FakeWriter:
@@ -44,7 +48,7 @@ class FakeWriter:
             raise self.release_error
 
 
-def configure_display(monkeypatch, wait_key=ord("q")):
+def configure_display(monkeypatch, wait_key=QUIT_KEY):
     monkeypatch.setattr(cli.cv2, "putText", lambda image, *args: image)
     monkeypatch.setattr(cli.cv2, "imshow", lambda *args: None)
     monkeypatch.setattr(cli.cv2, "waitKey", lambda delay: wait_key)
@@ -57,7 +61,8 @@ def configure_capture(monkeypatch, capture, frames):
         cli,
         "iter_frames",
         lambda current_capture: iter(
-            (float(index), frame) for index, frame in enumerate(frames)
+            (float(index) * 0.5, frame)
+            for index, frame in enumerate(frames)
         ),
     )
 
@@ -198,32 +203,66 @@ def test_resolution_change_interrupts_recording(
     assert "resolução do vídeo mudou" in capsys.readouterr().out
 
 
-def test_writer_release_failure_does_not_prevent_capture_release(
+def test_writer_release_failure_changes_session_status(
     monkeypatch, tmp_path, capsys
 ):
     capture = FakeCapture()
     frame = FakeFrame()
     writer = FakeWriter(release_error=RuntimeError("release failure"))
-    output = tmp_path / "video.mp4"
+    output = tmp_path / "session.json"
 
     monkeypatch.setattr(
         "sys.argv",
-        ["aetheris-video", "--record", str(output)],
+        ["aetheris-video", "--stats-json", str(output), "--record", "video.mp4"],
     )
 
     configure_capture(monkeypatch, capture, [frame])
     configure_display(monkeypatch)
 
-    monkeypatch.setattr(cli, "ensure_parent", lambda path: output)
+    monkeypatch.setattr(cli, "ensure_parent", lambda path: tmp_path / "video.mp4")
     monkeypatch.setattr(cli.cv2, "VideoWriter_fourcc", lambda *args: 0)
     monkeypatch.setattr(cli.cv2, "VideoWriter", lambda *args: writer)
 
     result = cli.main()
 
-    assert result == 0
+    report = json.loads(output.read_text(encoding="utf-8"))
+
+    assert result == 1
     assert writer.released
     assert capture.released
-    assert "falha ao liberar gravador" in capsys.readouterr().err
+    assert report["status"] == "error"
+    assert report["stop_reason"] == "cleanup_error"
+    assert report["exit_code"] == 1
+    assert "release failure" in report["error"]
+    assert len(report["cleanup_errors"]) == 1
+    assert "Falha ao liberar gravador" in capsys.readouterr().err
+
+
+def test_capture_release_failure_is_recorded_without_changing_session_status(
+    monkeypatch, tmp_path, capsys
+):
+    capture = FakeCapture(release_error=RuntimeError("capture release failure"))
+    output = tmp_path / "session.json"
+
+    monkeypatch.setattr(
+        "sys.argv",
+        ["aetheris-video", "--stats-json", str(output)],
+    )
+
+    configure_capture(monkeypatch, capture, [FakeFrame()])
+    configure_display(monkeypatch)
+
+    result = cli.main()
+
+    report = json.loads(output.read_text(encoding="utf-8"))
+
+    assert result == 0
+    assert capture.released
+    assert report["status"] == "completed"
+    assert report["exit_code"] == 0
+    assert len(report["cleanup_errors"]) == 1
+    assert "capture release failure" in report["cleanup_errors"][0]
+    assert "Falha ao liberar captura" in capsys.readouterr().err
 
 
 def test_stats_json_records_successful_session(monkeypatch, tmp_path, capsys):
@@ -250,6 +289,7 @@ def test_stats_json_records_successful_session(monkeypatch, tmp_path, capsys):
     assert report["average_fps"] == 2.0
     assert report["exit_code"] == 0
     assert report["error"] is None
+    assert report["cleanup_errors"] == []
     assert capture.released
     assert "Relatório da sessão salvo" in capsys.readouterr().out
 
@@ -295,6 +335,28 @@ def test_stats_json_records_connection_error(monkeypatch, tmp_path):
     assert report["exit_code"] == 1
 
 
+def test_stats_json_records_unexpected_exception(monkeypatch, tmp_path):
+    output = tmp_path / "session.json"
+
+    def fail_connection(config):
+        raise LookupError("unexpected failure")
+
+    monkeypatch.setattr(
+        "sys.argv",
+        ["aetheris-video", "--stats-json", str(output)],
+    )
+    monkeypatch.setattr(cli, "open_capture", fail_connection)
+    monkeypatch.setattr(cli.cv2, "destroyAllWindows", lambda: None)
+
+    assert cli.main() == 1
+
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert report["status"] == "error"
+    assert report["stop_reason"] == "error"
+    assert report["error"] == "unexpected failure"
+    assert report["exit_code"] == 1
+
+
 def test_stats_json_records_empty_stream(monkeypatch, tmp_path):
     capture = FakeCapture()
     output = tmp_path / "session.json"
@@ -314,3 +376,27 @@ def test_stats_json_records_empty_stream(monkeypatch, tmp_path):
     assert report["frames_received"] == 0
     assert report["average_fps"] == 0.0
     assert report["exit_code"] == 2
+
+
+def test_report_write_failure_does_not_mask_session_result(
+    monkeypatch, tmp_path, capsys
+):
+    capture = FakeCapture()
+
+    monkeypatch.setattr(
+        "sys.argv",
+        ["aetheris-video", "--stats-json", str(tmp_path / "session.json")],
+    )
+    configure_capture(monkeypatch, capture, [FakeFrame()])
+    configure_display(monkeypatch)
+
+    def fail_report(path, report):
+        raise OSError("disk unavailable")
+
+    monkeypatch.setattr(cli, "write_session_report", fail_report)
+
+    result = cli.main()
+
+    assert result == 0
+    assert capture.released
+    assert "não foi possível salvar o relatório" in capsys.readouterr().err

@@ -80,10 +80,12 @@ def main() -> int:
 
     session_started_at = datetime.now(timezone.utc).isoformat()
     session_started = monotonic()
+
     status = "error"
     stop_reason = "error"
     exit_code = 1
     error_message = None
+    cleanup_errors: list[str] = []
 
     try:
         config = VideoConfig(url=args.url)
@@ -95,8 +97,8 @@ def main() -> int:
         for timestamp, frame in iter_frames(capture):
             if first_frame_timestamp is None:
                 first_frame_timestamp = timestamp
-            last_frame_timestamp = timestamp
 
+            last_frame_timestamp = timestamp
             timestamps.append(timestamp)
             frames_seen += 1
 
@@ -157,54 +159,65 @@ def main() -> int:
             print("Nenhum frame recebido. Verifique a rede e a URL RTSP.")
             status = "no_frames"
             exit_code = 2
-            return exit_code
+        else:
+            status = "completed"
+            exit_code = 0
 
-        status = "completed"
-        exit_code = 0
-        return exit_code
-
-    except (
-        ConnectionError,
-        OSError,
-        RuntimeError,
-        ValueError,
-        cv2.error,
-    ) as exc:
+    # A CLI precisa registrar também exceções inesperadas da sessão.
+    except Exception as exc:  # noqa: BLE001
         error_message = str(exc)
         status = "error"
         stop_reason = "error"
         exit_code = 1
         print(f"Erro: {exc}")
-        return exit_code
 
     finally:
         for resource, description in (
             (writer, "gravador"),
             (capture, "captura"),
         ):
-            if resource is not None:
-                try:
-                    resource.release()
-                except Exception as exc:
-                    print(
-                        f"Aviso: falha ao liberar {description}: {exc}",
-                        file=sys.stderr,
-                    )
+            if resource is None:
+                continue
+
+            try:
+                resource.release()
+            # A falha de um recurso não deve impedir a liberação do próximo.
+            except Exception as exc:  # noqa: BLE001
+                cleanup_message = f"Falha ao liberar {description}: {exc}"
+                cleanup_errors.append(cleanup_message)
+
+                print(
+                    f"Aviso: {cleanup_message}",
+                    file=sys.stderr,
+                )
+
+                if description == "gravador" and status != "error":
+                    status = "error"
+                    stop_reason = "cleanup_error"
+                    exit_code = 1
+                    error_message = cleanup_message
 
         try:
             cv2.destroyAllWindows()
-        except cv2.error as exc:
+        # O fechamento das janelas não deve impedir a geração do relatório.
+        except Exception as exc:  # noqa: BLE001
+            cleanup_message = f"Falha ao fechar as janelas do OpenCV: {exc}"
+            cleanup_errors.append(cleanup_message)
+
             print(
-                f"Aviso: falha ao fechar as janelas do OpenCV: {exc}",
+                f"Aviso: {cleanup_message}",
                 file=sys.stderr,
             )
 
         if args.stats_json:
             elapsed = max(0.0, monotonic() - session_started)
+
             if (
                 frames_seen >= 2
                 and first_frame_timestamp is not None
                 and last_frame_timestamp is not None
+                and math.isfinite(first_frame_timestamp)
+                and math.isfinite(last_frame_timestamp)
                 and last_frame_timestamp > first_frame_timestamp
             ):
                 average_fps = (frames_seen - 1) / (
@@ -225,16 +238,20 @@ def main() -> int:
                 "exit_code": exit_code,
                 "recording_file": args.record,
                 "error": error_message,
+                "cleanup_errors": cleanup_errors,
             }
 
             try:
                 output = write_session_report(args.stats_json, report)
                 print(f"Relatório da sessão salvo em: {output}")
-            except (OSError, TypeError, ValueError) as exc:
+            # Uma falha no relatório não deve mascarar o resultado da sessão.
+            except Exception as exc:  # noqa: BLE001
                 print(
                     f"Aviso: não foi possível salvar o relatório: {exc}",
                     file=sys.stderr,
                 )
+
+    return exit_code
 
 
 if __name__ == "__main__":

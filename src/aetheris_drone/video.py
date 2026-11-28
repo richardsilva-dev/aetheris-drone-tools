@@ -3,10 +3,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from time import monotonic
-from typing import Iterator
 from urllib.parse import urlsplit
 
 import cv2
@@ -29,6 +29,8 @@ class VideoConfig:
 
         if any(char.isspace() for char in self.url):
             raise ValueError("A URL não pode conter espaços")
+        if "#" in self.url:
+            raise ValueError("A URL RTSP não pode conter fragmentos")
 
         try:
             parsed = urlsplit(self.url)
@@ -47,9 +49,6 @@ class VideoConfig:
 
         if port is not None and not 1 <= port <= 65535:
             raise ValueError("A porta RTSP precisa estar entre 1 e 65535")
-
-        if "#" in self.url:
-            raise ValueError("Fragmentos não são permitidos na URL RTSP")
 
         valid_open_timeout = (
             isinstance(self.open_timeout_ms, int)
